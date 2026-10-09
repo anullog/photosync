@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# photo.sh — three field operations, each fast and safe. No flow, no state.
-# macOS / stock bash 3.2.  rsync required; rename also needs exiftool.
+# photo.sh — field copy operations, each fast and safe. No flow, no state.
+# macOS / stock bash 3.2. Needs rsync: Homebrew rsync 3.x or macOS's built-in openrsync.
 #
-#   photo.sh copy   SRC DST [-c]            additive copy (never deletes on DST)
-#   photo.sh sync   SRC DST                 mirror SRC→DST (propagates deletes)
-#   photo.sh rename DIR [--shift ±Nh] [--backup]
+#   photo.sh copy   SRC DST [-c]    additive copy (never deletes on DST, asks before replacing)
+#   photo.sh sync   SRC DST         mirror SRC→DST (asks before deleting or replacing on DST)
+#   photo.sh verify SRC DST         checksum-compare every SRC file against DST
 #
-# "Safe" = rsync verifies every file's whole-file checksum in transit and re-sends
-# on mismatch, so a finished copy matches the source. It does NOT re-read the written
-# bytes back off the medium; `copy -c` adds that readback compare (use it before you
-# wipe a card). copy/sync are incremental: unchanged files (size+mtime) are skipped.
+# "Safe" = rsync verifies every file's whole-file checksum in transit and only gives a file its
+# real name once it is complete, so an interrupted run never leaves a truncated photo on DST.
+# `copy -c` and `verify` then compare checksums of SRC and DST. Right after a copy, DST is mostly
+# read back from the macOS memory cache, not the disk: before you wipe a card, eject and
+# reconnect DST, then run `verify`. copy/sync are incremental: unchanged files (size+mtime) are skipped.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -26,6 +27,7 @@ EXCLUDES=( --exclude='.DS_Store' --exclude='._*' --exclude='.Spotlight-V100'
            --exclude='.DocumentRevisions-V100' --exclude='System Volume Information'
            --exclude='$RECYCLE.BIN' )
 
+# PROG/CKSUM are expanded unquoted on purpose: empty → no argument (bash 3.2 has no safe empty arrays under set -u)
 PROG="--progress"; CKSUM=""
 _ver_ge() { local M m; [[ "$3" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
             M="${BASH_REMATCH[1]}"; m="${BASH_REMATCH[2]}"
@@ -35,122 +37,129 @@ _rsync_caps() {
     vstr="$(rsync --version 2>/dev/null)" || true
     [[ "$vstr" =~ version[[:space:]]+([0-9]+\.[0-9]+) ]] && v="${BASH_REMATCH[1]}"
     _ver_ge 3 1 "$v" && PROG="--info=progress2"
-    _ver_ge 3 2 "$v" && CKSUM="--checksum-choice=xxh128"
+    [[ "$vstr" == *xxh128* ]] && CKSUM="--checksum-choice=xxh128"
     return 0
 }
 
-# date-shift token for exiftool, from signed hours.  +2 → "-AllDates+=0:0:0 2:0:0"
-_shift_token() { local h="$1" op="+=" mag="$1"; [[ "$h" == -* ]] && { op="-="; mag="${h#-}"; }
-                 printf -- '-AllDates%s0:0:0 %s:0:0' "$op" "$mag"; }
-
-# read `rsync -i` lines on stdin, print only real content problems (missing/checksum/size)
-_problems() { awk '/^[<>c]f/{c=substr($0,1,11);
-                   if(substr(c,3,9)=="+++++++++"||substr(c,3,1)=="c"||substr(c,4,1)=="s") print}'; }
+# Filters over `rsync -i` lines on stdin. Only the leading 2–3 code chars are read, so they work
+# for rsync 3.x (11-char codes) and openrsync (9-char codes) alike. Output is plain paths.
+# _problems: in a `-rcn` dry run rsync lists a file only if it is missing on DST or its content differs.
+_problems()     { awk '/^[<>c]f/ { k = (substr($0,3,1) == "+") ? "missing" : "differs"
+                                   sub(/^[^ ]+ +/, ""); print k "  " $0 }'; }
+_deletions()    { awk '/^\*deleting/ && !/\/$/ { sub(/^[^ ]+ +/, ""); print }'; }
+_replacements() { awk '/^[<>c]f/ && substr($0,3,1) != "+" { sub(/^[^ ]+ +/, ""); print }'; }
+_list()         { awk 'NR<=20 { print "    " $0 } END { if (NR>20) print "    … and " NR-20 " more" }'; }
+_n()            { [[ -z "$1" ]] && echo 0 || printf '%s\n' "$1" | awk 'END { print NR }'; }
 
 _need_dir()  { [[ -d "$1" ]] || die "Not a directory: $1"; }
-_nonempty()  { [[ -n "$(find "$1" -type f -print -quit 2>/dev/null)" ]]; }
+# true if DIR holds a regular file outside hidden/system folders (.fseventsd, .Spotlight-V100, …)
+_nonempty()  { [[ -n "$(find -H "$1" -mindepth 1 \( -name '.*' -o -name 'System Volume Information' \
+                   -o -name '$RECYCLE.BIN' \) -prune -o -type f -print -quit 2>/dev/null)" ]]; }
 _have()      { command -v "$1" >/dev/null 2>&1 || die "$1 not installed."; }
+_no_opts()   { local x; for x in "$@"; do [[ "$x" != -* ]] || die "unknown option: $x"; done; }
+_confirm()   { local ans; printf '%s [y/N] ' "$1"; IFS= read -r ans || ans=""
+               [[ "$ans" == [yY]* ]] || die "aborted"; }
 
-# readback checksum compare (copy -c). Prints problem lines; empty = clean.
+# run rsync; on failure say so instead of exiting silently
+_rsync() { local rc=0; rsync "$@" || rc=$?
+           [[ "$rc" -eq 0 ]] || die "rsync failed (exit ${rc}): transfer incomplete. Re-run to finish."; }
+
+# dry-run SRC→DST (extra rsync args after the two dirs). Sets PV_DEL / PV_REP to the DST files
+# that would be deleted / replaced. Returns rsync's exit code.
+PV_DEL=""; PV_REP=""
+_preview() {
+    local src="$1" dst="$2" out rc=0; shift 2
+    out="$(rsync -ai --dry-run --modify-window=2 "$@" "${EXCLUDES[@]}" "${src}/" "${dst}/")" || rc=$?
+    PV_DEL="$(printf '%s\n' "$out" | _deletions)"
+    PV_REP="$(printf '%s\n' "$out" | _replacements)"
+    return "$rc"
+}
+
+# checksum compare (copy -c, verify). Prints problem lines; empty = clean.
 _verify() {
     local src="$1" dst="$2" out rc=0
-    out="$(rsync -rcni --no-owner --no-group ${CKSUM} "${EXCLUDES[@]}" "${src}/" "${dst}/" 2>/dev/null)" || rc=$?
-    [[ "$rc" -eq 0 ]] || { printf 'VERIFY-ERROR: rsync exit %s\n' "$rc"; return 0; }
+    out="$(rsync -rcni ${CKSUM} "${EXCLUDES[@]}" "${src}/" "${dst}/")" || rc=$?
+    [[ "$rc" -eq 0 ]] || { printf 'could not compare (rsync exit %s)\n' "$rc"; return 0; }
     printf '%s\n' "$out" | _problems
+}
+
+_check() {
+    say "verify (checksums) …"
+    local p; p="$(_verify "$1" "$2")"
+    [[ -z "$p" ]] || { printf '%s\n' "$p" | _list; die "VERIFY FAILED — do not wipe the source."; }
+    ok "checksums match: every SRC file is on DST with identical content"
 }
 
 cmd_copy() {
     _have rsync
     local verify=0 a=()
-    while [[ $# -gt 0 ]]; do case "$1" in -c|--verify) verify=1;; *) a+=("$1");; esac; shift; done
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -c|--verify) verify=1;;
+            -*) die "unknown option: $1";;
+            *) a+=("$1");;
+        esac; shift
+    done
     [[ "${#a[@]}" -eq 2 ]] || die "usage: copy SRC DST [-c]"
     local src="${a[0]}" dst="${a[1]}"
     _need_dir "$src"; mkdir -p "$dst"
     say "copy  ${src}  →  ${dst}"
-    rsync -a --partial --modify-window=2 ${PROG} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
+    local rc=0; _preview "$src" "$dst" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        warn "couldn't preview the copy (rsync exit $rc)."
+        _confirm "Copy anyway (may replace files on DST)?"
+    elif [[ -n "$PV_REP" ]]; then
+        warn "$(_n "$PV_REP") file(s) already on DST have a different size or date than SRC and would be REPLACED:"
+        printf '%s\n' "$PV_REP" | _list
+        _confirm "Replace them?"
+    fi
+    _rsync -a --modify-window=2 ${PROG} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
     if [[ "$verify" -eq 1 ]]; then
-        say "verify (readback) …"
-        local p; p="$(_verify "$src" "$dst")"
-        [[ -z "$p" ]] || { printf '%s\n' "$p" | awk 'NR<=40'; die "VERIFY FAILED — do not wipe the source."; }
-        ok "verified byte-for-byte"
+        _check "$src" "$dst"
+        say "Before wiping the card: eject + reconnect DST, then run  photo.sh verify SRC DST  (reads DST from disk)."
     fi
     ok "copy done"
 }
 
 cmd_sync() {
     _have rsync
+    _no_opts "$@"
     [[ $# -eq 2 ]] || die "usage: sync SRC DST"
     local src="$1" dst="$2"
     _need_dir "$src"; mkdir -p "$dst"
     _nonempty "$src" || die "Refusing to mirror: SRC has no files (would wipe DST)."
     say "sync  ${src}  →  ${dst}"
-    local out rc=0
-    out="$(rsync -ai --delete --dry-run --modify-window=2 "${EXCLUDES[@]}" "${src}/" "${dst}/" 2>/dev/null)" || rc=$?
-    local del=0
-    [[ "$rc" -eq 0 ]] && del="$(printf '%s\n' "$out" | grep -c '\*deleting' || true)"
+    local rc=0; _preview "$src" "$dst" --delete || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        warn "couldn't preview deletions (rsync exit $rc)."
-        printf 'Mirror anyway (may delete files on DST)? [y/N] '
-        local ans; IFS= read -r ans || ans=""; [[ "$(printf '%s' "$ans" | tr 'A-Z' 'a-z')" == y* ]] || die "aborted"
-    elif [[ "$del" -gt 0 ]]; then
-        warn "${del} file(s) on DST will be DELETED to match SRC."
-        printf 'Proceed? [y/N] '
-        local ans; IFS= read -r ans || ans=""; [[ "$(printf '%s' "$ans" | tr 'A-Z' 'a-z')" == y* ]] || die "aborted"
+        warn "couldn't preview the mirror (rsync exit $rc)."
+        _confirm "Mirror anyway (may delete or replace files on DST)?"
+    elif [[ -n "${PV_DEL}${PV_REP}" ]]; then
+        [[ -z "$PV_DEL" ]] || { warn "$(_n "$PV_DEL") file(s) on DST will be DELETED:"; printf '%s\n' "$PV_DEL" | _list; }
+        [[ -z "$PV_REP" ]] || { warn "$(_n "$PV_REP") file(s) on DST will be REPLACED:"; printf '%s\n' "$PV_REP" | _list; }
+        _confirm "Proceed?"
     fi
-    rsync -a --delete --partial --modify-window=2 ${PROG} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
+    _rsync -a --delete --modify-window=2 ${PROG} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
     ok "sync done"
 }
 
-cmd_rename() {
-    _have exiftool
-    local dir="" shift_h="" backup=0
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --shift) shift; shift_h="${1:-}";;
-            --backup) backup=1;;
-            -*) die "unknown option: $1";;
-            *) dir="$1";;
-        esac; shift
-    done
-    [[ -n "$dir" ]] || die "usage: rename DIR [--shift ±Nh] [--backup]"
-    _need_dir "$dir"
-    local EXTS=( -ext ARW -ext RAF -ext JPG -ext JPEG )
-
-    if [[ -n "$shift_h" ]]; then
-        [[ "$shift_h" =~ ^[+-]?[0-9]+h?$ ]] || die "shift must look like +2h or -3h"
-        local tok; tok="$(_shift_token "${shift_h%h}")"
-        say "shift dates ${shift_h%h}h …"
-        exiftool -q -overwrite_original -P -m "$tok" "${EXTS[@]}" -r "$dir" \
-            || warn "exiftool reported issues during shift (continuing)"
-    fi
-    if [[ "$backup" -eq 1 ]]; then
-        local bk="${dir%/}/_metadata_backup_$(date '+%Y%m%d_%H%M%S').json"
-        ( cd "$dir" && exiftool -q -j -r . ) > "$bk" 2>/dev/null || true
-        ok "metadata backup: $bk"
-    fi
-
-    local P='$FileName !~ /^\d{4}-\d\d-\d\d_\d{6}_/'
-    say "rename …"
-    exiftool -q -overwrite_original -m -r -d "%Y-%m-%d_%H%M%S" \
-        -if "$P" -if '$DateTimeOriginal' \
-        "-CreateDate<DateTimeOriginal" "-ModifyDate<DateTimeOriginal" "-FileModifyDate<DateTimeOriginal" \
-        '-FileName<${DateTimeOriginal}_${FileName}' "${EXTS[@]}" "$dir" 2>/dev/null || true
-    exiftool -q -overwrite_original -m -r -d "%Y-%m-%d_%H%M%S" \
-        -if "$P" -if 'not $DateTimeOriginal' -if '$CreateDate' \
-        '-FileName<${CreateDate}_${FileName}' "${EXTS[@]}" "$dir" 2>/dev/null || true
-    exiftool -q -overwrite_original -m -r -d "%Y-%m-%d_%H%M%S" \
-        -if "$P" '-FileName<${FileModifyDate}_${FileName}' "${EXTS[@]}" "$dir" 2>/dev/null || true
-    ok "rename done (date prefix added; originals recoverable by stripping it)"
+cmd_verify() {
+    _have rsync
+    _no_opts "$@"
+    [[ $# -eq 2 ]] || die "usage: verify SRC DST"
+    _need_dir "$1"; _need_dir "$2"
+    say "verify  $1  ↔  $2"
+    _check "$1" "$2"
 }
 
 usage() {
     cat <<EOF
-${BOLD}photo.sh${NC} — field photo operations
+${BOLD}photo.sh${NC} — field photo copy
 
-  photo.sh copy   SRC DST [-c]    additive copy, never deletes on DST. -c = readback verify.
-  photo.sh sync   SRC DST         mirror SRC→DST (deletes on DST to match; previews first).
-  photo.sh rename DIR [--shift ±Nh] [--backup]
-                                  exif-normalise + date-prefix rename, idempotent.
+  photo.sh copy   SRC DST [-c]    additive copy, never deletes on DST; asks before replacing.
+                                  -c = checksum-compare SRC and DST afterwards.
+  photo.sh sync   SRC DST         mirror SRC→DST; asks before deleting or replacing on DST.
+  photo.sh verify SRC DST         checksum-compare SRC and DST. Before wiping a card, eject and
+                                  reconnect DST first so DST is read from the disk.
 
 SRC/DST are directories; copy/sync move the CONTENTS of SRC into DST.
 EOF
@@ -158,11 +167,11 @@ EOF
 
 _main() {
     [[ $# -ge 1 ]] || { usage; exit 1; }
-    local sub="$1"; shift || true
+    local sub="$1"; shift
     case "$sub" in
         copy)   _rsync_caps; cmd_copy "$@";;
         sync)   _rsync_caps; cmd_sync "$@";;
-        rename) cmd_rename "$@";;
+        verify) _rsync_caps; cmd_verify "$@";;
         -h|--help|help) usage;;
         *) usage; die "unknown command: $sub";;
     esac
