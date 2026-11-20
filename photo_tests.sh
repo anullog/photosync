@@ -16,19 +16,20 @@ unset PHOTO_SH_TEST_ANSWER
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/photo_tests.XXXXXX")" && [[ -d "$T" ]] || { echo "mktemp failed"; exit 1; }
 trap 'chmod -R u+rwx "$T" 2>/dev/null; rm -rf "$T"' EXIT
+cd "$T" || exit 1   # a broken path check must never write into the repository
 
 P=0; F=0; FN=()
 ok_(){ P=$((P+1)); }
 bad_(){ F=$((F+1)); FN+=("$1"); printf '  FAIL %s  %s\n' "$1" "${2:-}"; }
-eq(){ [[ "$2" == "$3" ]] && ok_ || bad_ "$1" "want [$3] got [$2]"; }
-has(){ [[ "$2" == *"$3"* ]] && ok_ || bad_ "$1" "no [$3] in: $2"; }
-hasnt(){ [[ "$2" != *"$3"* ]] && ok_ || bad_ "$1" "unexpected [$3] in: $2"; }
-line(){ printf '%s\n' "$2" | grep -qxF -- "$3" && ok_ || bad_ "$1" "no line [$3] in: $2"; }
-true_(){ local n="$1"; shift; "$@" >/dev/null 2>&1 && ok_ || bad_ "$n"; }
-false_(){ local n="$1" rc; shift; "$@" >/dev/null 2>&1; rc=$?; [[ "$rc" -eq 1 ]] && ok_ || bad_ "$n" "want exit 1, got $rc"; }
-exists(){ [[ -e "$2" || -L "$2" ]] && ok_ || bad_ "$1" "missing $2"; }
-gone(){ [[ ! -e "$2" && ! -L "$2" ]] && ok_ || bad_ "$1" "still there: $2"; }
-isfile(){ [[ -f "$2" && ! -L "$2" ]] && ok_ || bad_ "$1" "not a plain file: $2"; }
+eq(){     if [[ "$2" == "$3" ]]; then ok_; else bad_ "$1" "want [$3] got [$2]"; fi; }
+has(){    if [[ "$2" == *"$3"* ]]; then ok_; else bad_ "$1" "no [$3] in: $2"; fi; }
+hasnt(){  if [[ "$2" != *"$3"* ]]; then ok_; else bad_ "$1" "unexpected [$3] in: $2"; fi; }
+line(){   if printf '%s\n' "$2" | grep -qxF -- "$3"; then ok_; else bad_ "$1" "no line [$3] in: $2"; fi; }
+true_(){  local n="$1"; shift; if "$@" >/dev/null 2>&1; then ok_; else bad_ "$n"; fi; }
+false_(){ local n="$1" rc; shift; "$@" >/dev/null 2>&1; rc=$?; if [[ "$rc" -eq 1 ]]; then ok_; else bad_ "$n" "want exit 1, got $rc"; fi; }
+exists(){ if [[ -e "$2" || -L "$2" ]]; then ok_; else bad_ "$1" "missing $2"; fi; }
+gone(){   if [[ ! -e "$2" && ! -L "$2" ]]; then ok_; else bad_ "$1" "still there: $2"; fi; }
+isfile(){ if [[ -f "$2" && ! -L "$2" ]]; then ok_; else bad_ "$1" "not a plain file: $2"; fi; }
 
 # ---- helpers -------------------------------------------------------------------------------------
 # _ver_ge
@@ -98,19 +99,33 @@ eq "local: dash"      "$(_local '-x')" "./-x"
 eq "local: absolute"  "$(_local /a/b)" "/a/b"
 
 # _no_overlap (dies → run in a subshell)
-o="$T/ov"; mkdir -p "$o/lib/2024" "$o/other"; ln -s "$o/lib" "$o/alias"
-false_ "overlap: same"            eval '( _no_overlap copy "$o/lib" "$o/lib" )'
-false_ "overlap: via symlink"     eval '( _no_overlap copy "$o/lib" "$o/alias/" )'
-false_ "overlap: DST inside SRC"  eval '( _no_overlap copy "$o/lib" "$o/lib/new/deeper" )'
-false_ "overlap: sync SRC in DST" eval '( _no_overlap sync "$o/lib/2024" "$o/lib" )'
-true_  "overlap: copy SRC in DST" eval '( _no_overlap copy "$o/lib/2024" "$o/lib" )'
-true_  "overlap: unrelated"       eval '( _no_overlap sync "$o/lib" "$o/other/new" )'
-true_  "overlap: name prefix"     eval '( mkdir -p "$o/lib2"; _no_overlap sync "$o/lib" "$o/lib2" )'
+# shellcheck disable=SC2329  # called through true_/false_
+ov(){ ( _no_overlap "$@" ); }
+o="$T/ov"; mkdir -p "$o/lib/2024" "$o/lib2" "$o/other"; ln -s "$o/lib" "$o/alias"
+false_ "overlap: same"            ov copy "$o/lib" "$o/lib"
+false_ "overlap: via symlink"     ov copy "$o/lib" "$o/alias/"
+false_ "overlap: DST inside SRC"  ov copy "$o/lib" "$o/lib/new/deeper"
+false_ "overlap: sync SRC in DST" ov sync "$o/lib/2024" "$o/lib"
+true_  "overlap: copy SRC in DST" ov copy "$o/lib/2024" "$o/lib"
+true_  "overlap: unrelated"       ov sync "$o/lib" "$o/other/new"
+true_  "overlap: name prefix"     ov sync "$o/lib" "$o/lib2"
+false_ "overlap: .. under missing" ov copy "$o/lib" "$o/nonexist/../lib/new"
 if [[ -d "$o/LIB" ]]; then   # case-insensitive volume (the macOS default)
-    false_ "overlap: case only" eval '( _no_overlap sync "$o/lib/2024" "$o/LIB" )'
+    false_ "overlap: case only" ov sync "$o/lib/2024" "$o/LIB"
 fi
 
 has "excludes .DS_Store" "${EXCLUDES[*]}" ".DS_Store"
+
+# _mounted: a DST under a volume that isn't connected is refused
+# shellcheck disable=SC2329  # called through true_/false_
+mnt(){ ( VOLS="$(cd "$T" && pwd -P)/vols"; _mounted "$VOLS/$1" ); }
+mkdir -p "$T/vols/SSD"
+true_  "mounted: connected"      mnt "SSD/shoot/card1"
+false_ "mounted: not connected"  mnt "SDD/shoot/card1"
+true_  "mounted: outside VOLS"   mnt "../x/y"
+
+# _sq: paths shown for pasting back into a shell
+eval "x=$(_sq "/Volumes/NO NAME/Peter's Zürich")"; eq "sq: round trip" "$x" "/Volumes/NO NAME/Peter's Zürich"
 
 # ---- end to end: run photo.sh as a command -------------------------------------------------------
 # stdin is never a terminal here. PHOTO_SH_TEST_ANSWER stands in for the answer typed on one.
@@ -121,6 +136,7 @@ mk(){ mkdir -p "$(dirname "$1")"; printf '%s' "$2" > "$1"; touch -t 202401010000
 run copy "$T/a" "$T/b" -n;  eq "copy: unknown option rc" "$RC" 2; has "copy: unknown option msg" "$OUT" "unknown option: -n"
 run sync "$T/a" "$T/b" -c;  eq "sync: unknown option rc" "$RC" 2; has "sync: unknown option msg" "$OUT" "unknown option: -c"
 run copy "$T/a";            eq "copy: one arg rc" "$RC" 2;        has "copy: usage" "$OUT" "usage: photo.sh copy SRC DST [-c]"
+run sync "$T/a" "$T/b" "$T/c"; eq "sync: three args rc" "$RC" 2;  has "sync: three args hint" "$OUT" "got 3 paths"
 run frobnicate;             eq "unknown command rc" "$RC" 2
 run rename "$T";            eq "rename is gone" "$RC" 2
 run;                        eq "no args rc" "$RC" 2
@@ -139,6 +155,51 @@ for r in "$(command -v rsync)" /usr/bin/rsync; do
 done
 [[ "${#IMPLS[@]}" -gt 0 ]] || bad_ "no rsync found for end-to-end tests"
 
+# Fake programs for failure tests. They read the real rsync from PHOTO_TESTS_RSYNC and pass every
+# call they don't fake to it, including openrsync's own `rsync --server`.
+FAKE="$T/fake"; mkdir -p "$FAKE/dryfail" "$FAKE/realfail" "$FAKE/partial" "$FAKE/late" "$FAKE/awk"
+cat > "$FAKE/dryfail/rsync" <<'EOF'
+#!/bin/bash
+# every dry run fails
+for a; do [[ "$a" == --dry-run ]] && { echo "fake: dry run failed" >&2; exit 23; }; done
+exec "$PHOTO_TESTS_RSYNC" "$@"
+EOF
+cat > "$FAKE/realfail/rsync" <<'EOF'
+#!/bin/bash
+# the real copy/sync run fails (it has --modify-window=2 and is neither a dry run nor a server)
+d=0; s=0; m=0
+for a; do case "$a" in --dry-run) d=1;; --server) s=1;; --modify-window=2) m=1;; esac; done
+[[ $m -eq 1 && $d -eq 0 && $s -eq 0 ]] && { echo "fake: disk full" >&2; exit 11; }
+exec "$PHOTO_TESTS_RSYNC" "$@"
+EOF
+cat > "$FAKE/partial/rsync" <<'EOF'
+#!/bin/bash
+# dry runs print their change list, then fail (like an unreadable folder somewhere)
+"$PHOTO_TESTS_RSYNC" "$@"; rc=$?
+for a; do [[ "$a" == --dry-run ]] && exit 23; done
+exit $rc
+EOF
+cat > "$FAKE/late/rsync" <<'EOF'
+#!/bin/bash
+# after the PHOTO_TESTS_LATE_N-th dry run, late1..3.ARW appear in $PHOTO_TESTS_LATE_DIR/$PHOTO_TESTS_LATE_SUB
+"$PHOTO_TESTS_RSYNC" "$@"; rc=$?
+for a; do
+    if [[ "$a" == --dry-run ]]; then
+        n=$(( $(cat "$PHOTO_TESTS_LATE_DIR/cnt" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$PHOTO_TESTS_LATE_DIR/cnt"
+        if [[ $n -eq $PHOTO_TESTS_LATE_N ]]; then for i in 1 2 3; do : > "$PHOTO_TESTS_LATE_DIR/$PHOTO_TESTS_LATE_SUB/late$i.ARW"; done; fi
+    fi
+done
+exit $rc
+EOF
+cat > "$FAKE/awk/awk" <<'EOF'
+#!/bin/bash
+# the awk program containing $PHOTO_TESTS_AWK_FAIL crashes
+for a; do [[ -n "${PHOTO_TESTS_AWK_FAIL:-}" && "$a" == *"$PHOTO_TESTS_AWK_FAIL"* ]] && exit 2; done
+exec /usr/bin/awk "$@"
+EOF
+chmod +x "$FAKE"/*/*
+late(){ rm -f "$1/cnt"; export PHOTO_TESTS_LATE_DIR="$1" PHOTO_TESTS_LATE_N="$2" PHOTO_TESTS_LATE_SUB="${3:-d}"; }
+
 # openrsync starts its receiver as `rsync --server` from PATH, so each rsync is tested by putting a
 # symlink named rsync first in PATH, never by calling it by absolute path.
 n=0
@@ -147,7 +208,7 @@ for R in "${IMPLS[@]}"; do
     case "$("$R" --version 2>&1)" in *openrsync*) t=openrsync$n;; *) t=rsync$n;; esac
     printf '%s: %s\n' "$t" "$("$R" --version 2>&1 | head -1)"
     B="$T/bin-$t"; mkdir -p "$B"; ln -sf "$R" "$B/rsync"
-    SAVED_PATH="$PATH"; PATH="$B:$PATH"; W="$T/$t"
+    SAVED_PATH="$PATH"; PATH="$B:$PATH"; W="$T/$t"; export PHOTO_TESTS_RSYNC="$R"
     _rsync_caps; PERISH=0; [[ "${EXCLUDES[*]}" == *"-p .DS_Store"* ]] && PERISH=1
     if [[ "$IW" -eq 11 || "$OPENRSYNC" -eq 1 ]]; then eq "$t perishable filters" "$PERISH" 1; fi
 
@@ -203,7 +264,7 @@ for R in "${IMPLS[@]}"; do
     run copy -- ../card -dash
     eq     "$t dash: rc"                 "$RC" 0
     exists "$t dash: copied"             "$W/colon/-dash/DCIM/A.ARW"
-    cd "$HERE" || exit 1
+    cd "$T" || exit 1
     mk "$W/u/lib/2024/A.ARW" a; mk "$W/u/bk/2024/A.ARW" a
     mk "$W/u/bk/Zürich – Tag 1/IMG_0001.ARW" only-copy; mk "$W/u/bk/Peter’s Hochzeit/IMG_0002.ARW" only-copy-2
     mk "$W/u/bk/  lead.ARW" x
@@ -320,52 +381,73 @@ for R in "${IMPLS[@]}"; do
 
     # rsync failures: a dry run that fails asks first and then replaces nothing; a failing real run
     # is reported. Fake rsyncs pass everything else (including openrsync's --server) to the real one.
-    FB="$T/bin-fail-$t"; mkdir -p "$FB"
-    printf '#!/bin/bash\nfor a; do [[ "$a" == --dry-run ]] && { echo "fake: dry run failed" >&2; exit 23; }; done\nexec "%s" "$@"\n' "$R" > "$FB/rsync"
-    chmod +x "$FB/rsync"
     mk "$W/pf/s/A.ARW" new-version; mk "$W/pf/s/B.ARW" b; mk "$W/pf/d/A.ARW" old
-    PATH="$FB:$SAVED_PATH" run copy "$W/pf/s" "$W/pf/d"
+    PATH="$FAKE/dryfail:$SAVED_PATH" run copy "$W/pf/s" "$W/pf/d"
     eq     "$t preview fails: asks"      "$RC" 1
     has    "$t preview fails: says so"   "$OUT" "couldn't fully preview"
-    PATH="$FB:$SAVED_PATH" answer y copy "$W/pf/s" "$W/pf/d"
+    has    "$t preview fails: question"  "$OUT" "Copy anyway?"
+    gone   "$t preview fails: no copy yet" "$W/pf/d/B.ARW"
+    PATH="$FAKE/dryfail:$SAVED_PATH" run sync "$W/pf/s" "$W/pf/d"
+    eq     "$t preview fails: sync rc"   "$RC" 1
+    has    "$t preview fails: sync asks" "$OUT" "anyway?"
+    PATH="$FAKE/dryfail:$SAVED_PATH" answer y copy "$W/pf/s" "$W/pf/d"
     eq     "$t preview fails: y rc"      "$RC" 1
     has    "$t preview fails: warns"     "$OUT" "preview reported errors"
     eq     "$t preview fails: no replace" "$(cat "$W/pf/d/A.ARW")" old
     exists "$t preview fails: copies new" "$W/pf/d/B.ARW"
-    printf '#!/bin/bash\nd=0; s=0; m=0\nfor a; do case "$a" in --dry-run) d=1;; --server) s=1;; --modify-window=2) m=1;; esac; done\n[[ $m -eq 1 && $d -eq 0 && $s -eq 0 ]] && { echo "fake: disk full" >&2; exit 11; }\nexec "%s" "$@"\n' "$R" > "$FB/rsync"
     mk "$W/rf/s/C.ARW" c
-    PATH="$FB:$SAVED_PATH" run copy "$W/rf/s" "$W/rf/d"
+    PATH="$FAKE/realfail:$SAVED_PATH" run copy "$W/rf/s" "$W/rf/d"
     eq     "$t real run fails: rc"       "$RC" 1
     has    "$t real run fails: says so"  "$OUT" "rsync failed (exit 11)"
 
-    # a filter that can't read rsync's output must stop the run, never look like "nothing to delete"
-    AB="$T/bin-awk-$t"; mkdir -p "$AB"
-    printf '#!/bin/bash\nfor a; do [[ "$a" == w=* ]] && exit 2; done\nexec /usr/bin/awk "$@"\n' > "$AB/awk"; chmod +x "$AB/awk"
-    mk "$W/fa/s/A.ARW" a; mk "$W/fa/d/A.ARW" a; mk "$W/fa/d/extra.ARW" e
-    PATH="$AB:$PATH" answer y sync "$W/fa/s" "$W/fa/d"
-    eq     "$t filter fails: stops"      "$RC" 1
-    has    "$t filter fails: says so"    "$OUT" "couldn't read rsync's preview"
-    exists "$t filter fails: kept"       "$W/fa/d/extra.ARW"
+    # a dry run that lists changes and then fails: the lists are shown as partial, the limits hold,
+    # and the run ends with exit 1
+    mk "$W/pp/s/A.ARW" new-version; mk "$W/pp/d/A.ARW" old; mk "$W/pp/d/extra.ARW" e
+    PATH="$FAKE/partial:$SAVED_PATH" answer y copy "$W/pp/s" "$W/pp/d"
+    eq     "$t partial: copy rc"         "$RC" 1
+    has    "$t partial: at least"        "$OUT" "at least 1 file(s) on DST will be REPLACED"
+    has    "$t partial: copy warns"      "$OUT" "preview reported errors"
+    eq     "$t partial: replaced"        "$(cat "$W/pp/d/A.ARW")" new-version
+    PATH="$FAKE/partial:$SAVED_PATH" answer y sync "$W/pp/s" "$W/pp/d"
+    eq     "$t partial: sync rc"         "$RC" 1
+    has    "$t partial: sync warns"      "$OUT" "preview reported errors"
+    gone   "$t partial: deleted"         "$W/pp/d/extra.ARW"
+
+    # a filter that can't read rsync's output must stop the run, never look like "nothing to do"
+    for m in 'w=' '!= "+"' 'nd[p]' 'a++'; do       # _deletions, _replacements, _typechg, the counter
+        for c in sync copy; do
+            rm -rf "$W/fa"; mk "$W/fa/s/A.ARW" a; mk "$W/fa/d/A.ARW" a; mk "$W/fa/d/extra.ARW" e
+            mk "$W/fa/s/R.ARW" new-version; mk "$W/fa/d/R.ARW" old
+            PHOTO_TESTS_AWK_FAIL="$m" PATH="$FAKE/awk:$PATH" answer y "$c" "$W/fa/s" "$W/fa/d"
+            eq     "$t filter '$m' fails, $c: stops"   "$RC" 1
+            has    "$t filter '$m' fails, $c: says so" "$OUT" "couldn't read rsync's preview"
+            exists "$t filter '$m' fails, $c: kept"    "$W/fa/d/extra.ARW"
+            eq     "$t filter '$m' fails, $c: not replaced" "$(cat "$W/fa/d/R.ARW")" old
+        done
+    done
 
     # SRC/DST changing after the preview: a fake rsync adds late*.ARW to DST after its Nth dry run
-    LB="$T/bin-late-$t"; mkdir -p "$LB"
-    late(){ rm -f "$1/cnt"; printf '#!/bin/bash\n"%s" "$@"; rc=$?\nfor a; do if [[ "$a" == --dry-run ]]; then n=$(( $(cat "%s/cnt" 2>/dev/null || echo 0) + 1 )); echo $n > "%s/cnt"; if [[ $n -eq %s ]]; then for i in 1 2 3; do : > "%s/d/late$i.ARW"; done; fi; fi; done\nexit $rc\n' \
-                "$R" "$1" "$1" "$2" "$1" > "$LB/rsync"; chmod +x "$LB/rsync"; }
     mk "$W/tt/s/A.ARW" a; mk "$W/tt/d/A.ARW" a; mk "$W/tt/d/extra.ARW" e
-    late "$W/tt" 1; PATH="$LB:$SAVED_PATH" answer y sync "$W/tt/s" "$W/tt/d"
+    late "$W/tt" 1; PATH="$FAKE/late:$SAVED_PATH" answer y sync "$W/tt/s" "$W/tt/d"
     eq     "$t recheck: stops"           "$RC" 1
     has    "$t recheck: says so"         "$OUT" "changed while waiting"
     exists "$t recheck: late kept"       "$W/tt/d/late3.ARW"
     exists "$t recheck: listed kept"     "$W/tt/d/extra.ARW"
     rm -f "$W/tt/d"/late*.ARW
-    late "$W/tt" 2; PATH="$LB:$SAVED_PATH" answer y sync "$W/tt/s" "$W/tt/d"   # appears after the re-check
+    late "$W/tt" 2; PATH="$FAKE/late:$SAVED_PATH" answer y sync "$W/tt/s" "$W/tt/d"   # appears after the re-check
     eq     "$t max-delete: stops"        "$RC" 1
     has    "$t max-delete: says so"      "$OUT" "stopped deleting"
-    eq     "$t max-delete: one deleted"  "$(ls "$W/tt/d" | wc -l | tr -d ' ')" 4
+    eq     "$t max-delete: one deleted"  "$(find "$W/tt/d" -mindepth 1 | wc -l | tr -d ' ')" 4
     mk "$W/nd/s/A.ARW" a; mk "$W/nd/d/A.ARW" a; mk "$W/nd/s/B.ARW" b
-    late "$W/nd" 1; PATH="$LB:$SAVED_PATH" run sync "$W/nd/s" "$W/nd/d"           # nothing to delete: no --delete
+    late "$W/nd" 1; PATH="$FAKE/late:$SAVED_PATH" run sync "$W/nd/s" "$W/nd/d"           # nothing to delete: no --delete
     eq     "$t no deletions: rc"         "$RC" 0
     exists "$t no deletions: late kept"  "$W/nd/d/late1.ARW"
+
+    mk "$W/lc/s/A.ARW" new-version; mk "$W/lc/d/A.ARW" old
+    late "$W/lc" 1 s; PATH="$FAKE/late:$SAVED_PATH" answer y copy "$W/lc/s" "$W/lc/d"
+    eq     "$t copy recheck: stops"      "$RC" 1
+    has    "$t copy recheck: says so"    "$OUT" "changed while waiting"
+    eq     "$t copy recheck: kept"       "$(cat "$W/lc/d/A.ARW")" old
 
     # empty and unresolvable path arguments
     run copy "" "$W/x";                eq "$t empty SRC: rc" "$RC" 2
@@ -379,6 +461,7 @@ for R in "${IMPLS[@]}"; do
     run copy "$W/rv/s" "$W/rv/d"
     eq     "$t folder in the way: rc"    "$RC" 1
     exists "$t folder in the way: kept"  "$W/rv/d/Edits/x.jpg"
+    has    "$t folder in the way: msg"   "$OUT" "Move or rename"
 
     # a symlink whose target changed is asked about (openrsync does not list it by itself)
     mkdir -p "$W/sl/s" "$W/sl/d"; mk "$W/sl/s/A.ARW" a; mk "$W/sl/d/A.ARW" a
@@ -395,6 +478,7 @@ for R in "${IMPLS[@]}"; do
     eq     "$t odd names: asks"          "$RC" 1
     isfile "$t odd names: kept 1"        "$W/xn/d/a -> b.arw"
     isfile "$t odd names: kept 2"        "$W/xn/d/lit\\#123"
+    has    "$t odd names: both listed"   "$OUT" "2 file(s) on DST will be REPLACED"
 
     # a second card synced onto the first card's folder: replacements count like deletions
     for i in $(seq -w 1 40); do mk "$W/c2/card1/DSC000$i.ARW" "card1-$i"; done
@@ -405,6 +489,56 @@ for R in "${IMPLS[@]}"; do
     answer y copy "$W/c2/card2" "$W/c2/card1"
     eq     "$t 2nd card copy: y refused" "$RC" 1
     eq     "$t 2nd card: originals kept" "$(cat "$W/c2/card1/DSC00001.ARW")" card1-01
+
+    mk "$W/w2/s/A" aaaa; mk "$W/w2/d/A" bbbb; touch -t 202401010000.01 "$W/w2/s/A"; mk "$W/w2/s/B" b
+    run sync "$W/w2/s" "$W/w2/d"
+    eq     "$t 2s window sync: rc"       "$RC" 0
+    eq     "$t 2s window sync: kept"     "$(cat "$W/w2/d/A")" bbbb
+    mk "$W/tl/s/Album/x.jpg" x; mkdir -p "$W/tl/d"; ln -s /nowhere "$W/tl/d/Album"
+    run copy "$W/tl/s" "$W/tl/d"
+    eq     "$t link in the way: asks"    "$RC" 1
+    has    "$t link in the way: listed"  "$OUT" "Album"
+    for i in $(seq -w 1 42); do mk "$W/hf/d/$i.ARW" old; done
+    for i in $(seq -w 1 21); do mk "$W/hf/s/$i.ARW" new-version; done
+    answer y copy "$W/hf/s" "$W/hf/d"
+    eq     "$t half: y is enough"        "$RC" 0
+
+    mk "$W/lk/s/2023/IMG_1.ARW" card2-photo; mk "$W/lk/s/2023/Y/a.jpg" a
+    mk "$W/lk/d/2023/IMG_1.ARW" precious1; mk "$W/lk/d/2023/Y" precious2; chmod -R a-x "$W/lk/d/2023"
+    for c in sync copy; do
+        answer y "$c" "$W/lk/s" "$W/lk/d"
+        eq  "$t unreadable DST, $c: stops"   "$RC" 1
+        has "$t unreadable DST, $c: says so" "$OUT" "can't be read"
+    done
+    chmod -R u+rwx "$W/lk/d"
+    eq     "$t unreadable DST: kept"     "$(cat "$W/lk/d/2023/IMG_1.ARW")" precious1
+    isfile "$t unreadable DST: kept 2"   "$W/lk/d/2023/Y"
+
+    mk "$W/vu/s/A.ARW" aaaa; mk "$W/vu/d/A.ARW" XXXX; mk "$W/vu/s/B.ARW" b; mk "$W/vu/d/B.ARW" b
+    chmod 000 "$W/vu/s/A.ARW" "$W/vu/d/A.ARW"
+    if [[ ! -r "$W/vu/s/A.ARW" ]]; then          # not when run as root
+        run verify "$W/vu/s" "$W/vu/d"
+        eq  "$t unreadable files: fails"   "$RC" 1
+        mk "$W/vx/s/sub/B.ARW" b; mk "$W/vx/s/A.ARW" a; mk "$W/vx/d/sub/B.ARW" b; mk "$W/vx/d/A.ARW" a
+        chmod 000 "$W/vx/s/sub"
+        run verify "$W/vx/s" "$W/vx/d"
+        eq  "$t unreadable folder: fails"  "$RC" 1
+        has "$t unreadable folder: says"   "$OUT" "could not compare everything"
+        chmod 755 "$W/vx/s/sub"
+    fi
+    chmod 644 "$W/vu/s/A.ARW" "$W/vu/d/A.ARW"
+
+    mk "$W/sv/s/A.ARW" a; ln -s ../elsewhere "$W/sv/s/2023"
+    run copy "$W/sv/s" "$W/sv/d" -c
+    eq     "$t verify links: rc"         "$RC" 0
+    has    "$t verify links: warns"      "$OUT" "1 symlink(s) in SRC were not compared"
+    has    "$t copy -c: not yet safe"    "$OUT" "Not yet safe to wipe the card"
+    has    "$t copy -c: paste-ready"     "$OUT" "photo.sh verify '$W/sv/s' '$W/sv/d'"
+    mk "$W/sv/d/A.ARW" b
+    run verify "$W/sv/s" "$W/sv/d"
+    has    "$t differs: hint"            "$OUT" "copy SRC into a new, empty folder"
+    run copy "$W/nope" "$W/sv/d"
+    has    "$t missing SRC: hint"        "$OUT" "check that it is connected"
 
     # the real terminal: only when a pseudo-terminal can be opened here
     if script -q /dev/null /usr/bin/true >/dev/null 2>&1; then

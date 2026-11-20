@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # photo.sh — safe copy, mirror and verify for photo folders and memory cards. No state, no config.
-# macOS, stock bash 3.2. Needs rsync: macOS's built-in openrsync works; Homebrew rsync 3.x adds a
-# single overall progress bar.
+# macOS, stock bash 3.2. Needs rsync: macOS's built-in one works (openrsync on current macOS, rsync
+# 2.6.9 on older releases); Homebrew rsync 3.x adds a single overall progress bar.
 #
 #   photo.sh copy   SRC DST [-c]    copy SRC into DST. Never deletes on DST; asks before replacing.
-#   photo.sh sync   SRC DST         make DST an exact mirror of SRC; asks before deleting or replacing.
+#   photo.sh sync   SRC DST         make DST mirror the files in SRC; asks before deleting or replacing.
 #   photo.sh verify SRC DST         check that every SRC file is on DST with identical content.
 #
 # How it stays safe:
@@ -18,7 +18,8 @@
 #    from the macOS memory cache: before wiping a card, eject and reconnect DST, then run `verify`.
 
 # Must be POSIX sh syntax: zsh/sh read this line before any bash-only syntax below. `return` covers
-# being sourced, so the caller's shell stays open.
+# being sourced, so the caller's shell stays open; `exit` covers being run.
+# shellcheck disable=SC2317
 [ -n "${BASH_VERSION:-}" ] || { echo "photo.sh: needs bash. Run it as ./photo.sh or: bash photo.sh" >&2; return 2 2>/dev/null; exit 2; }
 
 VERSION="1.0.0"
@@ -31,15 +32,16 @@ ok()   { printf '%s✓ %s%s\n' "$GRN" "$1" "$NC"; }
 warn() { printf '%s⚠ %s%s\n' "$YLW" "$1" "$NC2" >&2; }
 die()  { printf '%s✗ %s%s\n' "$RED" "$1" "$NC2" >&2; exit "${2:-1}"; }
 
-# Card and macOS system clutter: never copied, deleted or compared.
+# Card and macOS system clutter: never copied, deleted or compared. ($RECYCLE.BIN is a literal name.)
+# shellcheck disable=SC2016
 JUNK=( '.DS_Store' '._*' '.Spotlight-V100' '.Trashes' '.fseventsd' '.TemporaryItems'
        '.DocumentRevisions-V100' 'System Volume Information' '$RECYCLE.BIN' )
 FIND_JUNK=(); for _p in "${JUNK[@]}"; do FIND_JUNK+=( -o -name "$_p" ); done; unset _p
 
-# Set by _rsync_caps for the rsync in PATH. PROG is expanded unquoted on purpose: empty gives no
-# argument (bash 3.2 has no safe empty arrays under set -u); its two words are split on IFS's \n.
-# IW is the width of rsync's itemize codes: 11 for rsync 3.x, 9 for openrsync and rsync 2.x.
-PROG=""; IW=11; OPENRSYNC=0
+# Set by _rsync_caps for the rsync in PATH. PROG holds the progress options. Arrays that may be empty
+# are expanded as ${a[@]+"${a[@]}"}: bash 3.2 treats a plain "${a[@]}" of an empty array as unset
+# under set -u. IW is the width of rsync's itemize codes: 11 for rsync 3.x, 9 for openrsync and 2.x.
+PROG=(); IW=11; OPENRSYNC=0
 _plain_excludes() { local p; EXCLUDES=(); for p in "${JUNK[@]}"; do EXCLUDES+=( "--exclude=$p" ); done; }
 _plain_excludes
 _ver_ge() { local M m; [[ "$3" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
@@ -47,14 +49,14 @@ _ver_ge() { local M m; [[ "$3" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
             [[ "$M" -gt "$1" || ( "$M" -eq "$1" && "$m" -ge "$2" ) ]]; }
 _rsync_caps() {
     local vstr v="" rs3=0 p
-    PROG=""; IW=9; OPENRSYNC=0; _plain_excludes
+    PROG=(); IW=9; OPENRSYNC=0; _plain_excludes
     vstr="$(rsync --version 2>/dev/null)" || true
     [[ "$vstr" =~ version[[:space:]]+v?([0-9]+\.[0-9]+) ]] && v="${BASH_REMATCH[1]}"
     if [[ "$vstr" == *openrsync* ]]; then OPENRSYNC=1; elif _ver_ge 3 0 "$v"; then rs3=1; IW=11; fi
     if [[ -t 1 ]]; then
         # one bar for the whole run; building the full file list first keeps its % from jumping back
-        if [[ "$rs3" -eq 1 ]] && _ver_ge 3 1 "$v"; then PROG=$'--info=progress2\n--no-inc-recursive'
-        else PROG="--progress"; fi
+        if [[ "$rs3" -eq 1 ]] && _ver_ge 3 1 "$v"; then PROG=( --info=progress2 --no-inc-recursive )
+        else PROG=( --progress ); fi
     fi
     # Perishable excludes (rsync 3.x, openrsync): clutter inside a folder that sync deletes no longer
     # keeps that folder alive. Probed, because older rsyncs reject the modifier.
@@ -72,6 +74,7 @@ _rsync_caps() {
 # names print as they are, while control characters stay escaped; benc() rewrites every escape for
 # bash's printf %b, to rebuild the exact name on disk. Only the first 2–3 code characters are read,
 # so the filters work for rsync 3.x (11-char codes) and openrsync (9-char codes) alike.
+# shellcheck disable=SC2016  # awk code: its $ fields are not shell expansions
 _AWK_LIB='
 function un(s,   o, i, c) {
     o = ""
@@ -121,13 +124,19 @@ _typechg() {
     done
 }
 # openrsync neither lists nor counts a symlink whose target changed (rsync 3 shows cLc…): compare them
+# (one batched stat per side; if the lists don't line up, every candidate counts as changed).
 _relinks() {  # SRC DST
-    local l
-    { (CDPATH='' cd "$1" && find . \( -false "${FIND_JUNK[@]}" \) -prune -o -type l -print) 2>/dev/null || true; } |
-    while IFS= read -r l; do
-        l="${l#./}"
-        if [[ -L "$2/$l" && "$(readlink "$1/$l")" != "$(readlink "$2/$l")" ]]; then printf '%s\n' "$l"; fi
-    done
+    local l c n
+    c="$( { (CDPATH='' cd "$1" && find . \( -false "${FIND_JUNK[@]}" \) -prune -o -type l -print) 2>/dev/null || true; } |
+          while IFS= read -r l; do if [[ -L "$2/$l" ]]; then printf '%s\n' "$l"; fi; done )"
+    [[ -n "$c" ]] || return 0
+    n="$(_n "$c")"
+    { printf '%s\n' "$c"
+      for l in "$1" "$2"; do
+          (CDPATH='' cd "$l" && printf '%s\n' "$c" | tr '\n' '\000' | xargs -0 /usr/bin/stat -f '%Y') || true
+      done; } 2>/dev/null |
+    LC_ALL=C awk -v n="$n" 'NR <= n { p[NR] = substr($0, 3); next } NR <= 2 * n { s[NR - n] = $0; next }
+        { d[NR - 2 * n] = $0 } END { for (i = 1; i <= n; i++) if (NR != 3 * n || s[i] != d[i]) print p[i] }'
 }
 # DST files a --delete run removes. Folders and clutter are left out (they hold no photos), and
 # openrsync can list a file twice.
@@ -149,13 +158,51 @@ _list() { LC_ALL=C sed $'s/\xc2[\x80-\x9f]/?/g; s/\xe2\x80[\xaa-\xae]/?/g; s/\xe
 _n() { if [[ -z "$1" ]]; then echo 0; else printf '%s\n' "$1" | LC_ALL=C awk 'END { print NR }'; fi; }
 
 # ---- paths ---------------------------------------------------------------------------------------
-_need_dir() { [[ -d "$1" ]] || die "Not a directory: $1"; }
-_not_file() { [[ ! -e "$1" || -d "$1" ]] || die "Not a directory: $1"; }
+_need_dir() { [[ -d "$1" ]] && return 0; [[ -e "$1" ]] && die "Not a folder: $1"
+              die "No such folder: $1 (on a card or drive? check that it is connected:  ls /Volumes)"; }
+_not_file() { [[ ! -e "$1" || -d "$1" ]] || die "Not a folder: $1"; }
+# A DST under /Volumes/NAME needs that volume: without this check a drive that isn't connected (or a
+# mistyped name) ends in a raw mkdir error, and with sudo it would fill the internal disk instead.
+VOLS=/Volumes
+_mounted() {
+    local r; r="$(_real "$1")" || return 0
+    case "$r" in "$VOLS"/?*)
+        r="${r#"$VOLS"/}"; r="$VOLS/${r%%/*}"
+        [[ -d "$r" ]] || die "$r is not connected (or has another name:  ls $VOLS): nothing changed.";;
+    esac
+}
+# DST folders this user can't read or enter, where SRC has a folder. rsync can't see into them, so the
+# preview can't list what would be replaced there (openrsync even reports it all as new).
+_blind() {  # SRC DST
+    local d
+    [[ -r "$2" && -x "$2" ]] || { printf '.\n'; return 0; }
+    { (CDPATH='' cd "$1" && find . -mindepth 1 \( -false "${FIND_JUNK[@]}" \) -prune -o -type d -print) 2>/dev/null || true; } |
+    while IFS= read -r d; do
+        d="${d#./}"
+        if [[ -d "$2/$d" && ! ( -r "$2/$d" && -x "$2/$d" ) ]]; then printf '%s\n' "$d"; fi
+    done
+}
+_no_blind() {  # SRC DST
+    local b; b="$(_blind "$1" "$2")"; [[ -n "$b" ]] || return 0
+    warn "$(_n "$b") folder(s) on DST can't be read, so the preview can't see what would be replaced in them:"
+    printf '%s\n' "$b" | _list >&2
+    die "Make them readable (chmod -R u+rwX on them), then re-run: nothing changed."
+}
+# SRC files this user can't open: rsync 3 checksums an unreadable file as zeros, so two unreadable
+# copies would "match".
+_unreadable() {
+    local f
+    { (CDPATH='' cd "$1" && find . -mindepth 1 \( -false "${FIND_JUNK[@]}" \) -prune -o -type f -print) 2>/dev/null || true; } |
+    while IFS= read -r f; do if [[ ! -r "$1/$f" ]]; then printf 'unreadable  %s\n' "${f#./}"; fi; done
+}
+# a path quoted for pasting into a shell (bash 3.2's printf %q turns UTF-8 into $'\ooo')
+_sq() { local s="$1" q="'\\''"; printf "'%s'" "${s//\'/$q}"; }
 _have()     { command -v "$1" >/dev/null 2>&1 || die "$1 not installed."; }
 # rsync reads "a:b" as host:path when the ':' comes before any '/'. Anchor relative paths with ./
 # so a folder like "shoot 10:30" (or one named "-x") stays a local folder.
 _local() { case "$1" in /*) printf '%s' "$1";; *) printf './%s' "$1";; esac; }
 # true if DIR holds a regular file outside hidden/system folders (.fseventsd, .Spotlight-V100, …)
+# shellcheck disable=SC2016  # '$RECYCLE.BIN' is a literal name
 _nonempty() { [[ -n "$(find -H "$1" -mindepth 1 \( -name '.*' -o -name 'System Volume Information' \
                   -o -name '$RECYCLE.BIN' \) -prune -o -type f -print -quit 2>/dev/null)" ]]; }
 # number of files in DIR that verify compares (clutter left out, as in EXCLUDES)
@@ -178,7 +225,8 @@ _real() {
 # itself on every run) and, for sync, SRC inside DST (the mirror would delete SRC itself).
 _no_overlap() {  # MODE SRC DST
     local s d
-    s="$(_real "$2")" && d="$(_real "$3")" || die "Cannot resolve the path of $2 or $3"
+    s="$(_real "$2")" || die "Cannot resolve the path of $2"
+    d="$(_real "$3")" || die "Cannot resolve the path of $3"
     s="${s%/}/"; d="${d%/}/"
     [[ "$s" != "$d" ]] || die "SRC and DST are the same folder."
     [[ "$d" != "$s"* ]] || die "DST is inside SRC: every run would copy DST into itself."
@@ -204,7 +252,7 @@ _guard() {  # N QUESTION DST
     local n="$1" total=0
     [[ "$n" -le 20 ]] || total="$(_count_files "$3")"
     if [[ "$n" -gt 20 && $((n * 2)) -gt "$total" ]]; then
-        warn "That is $n of the $total files on DST. Check that SRC and DST are the folders you meant."
+        warn "That is $n of the $total files in DST ($3). Check that SRC and DST are the folders you meant."
         _ask "To go ahead, type the number $n:"
         [[ "$ANS" == "$n" ]] || die "aborted: nothing changed"
     else
@@ -218,10 +266,12 @@ _rsync() {
     local rc=0; rsync "$@" || rc=$?
     case "$rc" in
         0)  ;;
-        25) die "rsync stopped deleting at the previewed count: DST changed after the preview, so some deletions may differ from the list. Re-run to see the new list.";;
+        25) _rsync_stopped;;
         *)  die "rsync failed (exit ${rc}). Files already copied are complete; fix the errors above, then re-run.";;
     esac
 }
+
+_rsync_stopped() { die "rsync stopped deleting at the previewed count: DST changed after the preview, so some deletions may differ from the list. Re-run to see the new list."; }
 
 # Dry-run SRC→DST with the real run's options plus extra args. Sets PV_DEL / PV_REP (DST files that
 # would be deleted / replaced, type changes included), PV_WAY (DST folders where SRC has a file or
@@ -265,22 +315,32 @@ _show() {
 }
 # the preview showed rsync errors: what was asked about may not be everything
 _preview_errors() { die "the preview reported errors (see above), so this run may be incomplete. Fix them and re-run$1."; }
+_incomplete() { [[ -z "$1" ]] || printf ': the %s below may be incomplete' "$2"; }   # LISTED-TEXT NOUN
 
 # checksum compare (copy -c, verify). Prints problem lines; empty = clean.
 _verify() {
-    local out rc=0 p nl=$'\n'
+    local out rc=0 p u nl=$'\n'
+    u="$(_unreadable "$1")"
     out="$(rsync -rcni "${EXCLUDES[@]}" "${1}/" "${2}/")" || rc=$?
     p="$(printf '%s\n' "$out" | _problems)" || p="${p}${p:+$nl}could not read rsync's output"
+    [[ -z "$u" ]] || p="${p}${p:+$nl}${u}"
     [[ "$rc" -eq 0 ]] || p="${p}${p:+$nl}could not compare everything (rsync exit ${rc})"
     printf '%s' "$p"
 }
 _check() {
-    local n p; n="$(_count_files "$1")"
+    local n p l nl=$'\n'; n="$(_count_files "$1")"
     [[ "$n" -gt 0 ]] || die "SRC has no files: nothing to verify."
     say "verify (checksums) …"
     p="$(_verify "$1" "$2")"
-    if [[ -n "$p" ]]; then printf '%s\n' "$p" | _list; die "VERIFY FAILED — do not wipe the source."; fi
+    if [[ -n "$p" ]]; then
+        printf '%s\n' "$p" | _list
+        [[ "$nl$p" != *"${nl}differs  "* ]] ||
+            warn "copy and sync compare only name, size and date, so re-running them may skip a 'differs' file: copy SRC into a new, empty folder and verify that one."
+        die "VERIFY FAILED — do not wipe the source."
+    fi
     ok "checksums match: all $n SRC files are on DST with identical content"
+    l="$({ find -H "$1" -mindepth 1 \( -false "${FIND_JUNK[@]}" \) -prune -o -type l -print 2>/dev/null || true; } | LC_ALL=C awk 'END { print NR }')"
+    [[ "$l" -eq 0 ]] || warn "$l symlink(s) in SRC were not compared: copy and sync copy a link, not the file or folder it points to."
 }
 
 # ---- commands ------------------------------------------------------------------------------------
@@ -299,7 +359,8 @@ _args() {
         shift
     done
     for x in "$@"; do _arg "$x"; done
-    [[ "$n" -eq 2 ]] || { [[ "$cmd" == copy ]] && die "usage: photo.sh copy SRC DST [-c]" 2; die "usage: photo.sh $cmd SRC DST" 2; }
+    x=""; [[ "$n" -le 2 ]] || x="   (got $n paths: quote a path with spaces, e.g. \"/Volumes/NO NAME\"; options go before --)"
+    [[ "$n" -eq 2 ]] || { [[ "$cmd" == copy ]] && die "usage: photo.sh copy SRC DST [-c]$x" 2; die "usage: photo.sh $cmd SRC DST$x" 2; }
 }
 _arg() {  # one positional argument for _args (uses its local n)
     [[ -n "$1" ]] || die "empty path argument" 2
@@ -308,60 +369,70 @@ _arg() {  # one positional argument for _args (uses its local n)
 
 cmd_copy() {
     _args copy "$@"; _have rsync; _rsync_caps
-    local src dst rc=0 run=1 keep="--ignore-existing" pre=""
+    local src dst rc=0 run=1 pre="" keep=( --ignore-existing )
     src="$(_local "$A1")"; dst="$(_local "$A2")"
-    _need_dir "$src"; _not_file "$dst"; _no_overlap copy "$src" "$dst"
+    _need_dir "$src"; _not_file "$dst"; _no_overlap copy "$src" "$dst"; _mounted "$dst"
     say "copy  ${src}  →  ${dst}"
     if [[ -d "$dst" ]]; then
-        _preview "$src" "$dst" || rc=$?
+        _no_blind "$src" "$dst"
+        # --force only in the dry runs: it makes rsync 3 list a DST folder that sits where SRC has a
+        # file, so it is reported below instead of failing the preview.
+        _preview "$src" "$dst" --force || rc=$?
         [[ "$rc" -ne 98 ]] || die "couldn't read rsync's preview output: nothing changed."
         if [[ -n "$PV_WAY" ]]; then
             warn "$(_n "$PV_WAY") folder(s) on DST are where SRC has a file or link, so copy can't put those there:"
             printf '%s\n' "$PV_WAY" | _list >&2
             die "Move or rename those folders on DST, then re-run: nothing changed."
         fi
-        if [[ "$rc" -ne 0 ]]; then pre="at least "; warn "couldn't fully preview the copy (rsync exit $rc): the list below may be incomplete."; fi
+        if [[ "$rc" -ne 0 ]]; then
+            pre="at least "
+            warn "couldn't fully preview the copy (rsync exit $rc, errors above)$(_incomplete "$PV_REP" list)."
+        fi
         if [[ -n "$PV_REP" ]]; then
             _show "$pre"
             warn "If these are different photos with the same names, answer N and copy into a new folder."
-            _guard "$(_n "$PV_REP")" "Replace them?" "$dst"
-            _recheck "$rc" "$src" "$dst"; keep=""
+            _guard "$(_n "$PV_REP")" "Replace them in DST ($dst)?" "$dst"
+            _recheck "$rc" "$src" "$dst" --force; keep=()
         elif [[ "$rc" -ne 0 ]]; then
             _confirm "Copy anyway? Files already on DST are left as they are."
-            _recheck "$rc" "$src" "$dst"
+            _recheck "$rc" "$src" "$dst" --force
         elif [[ "$PV_ANY" -eq 0 ]]; then
-            ok "nothing to copy: DST already has every SRC file"; run=0
+            ok "nothing to copy: every SRC file is already on DST (same name, size and date)"; run=0
         fi
     fi
     if [[ "$run" -eq 1 ]]; then
         mkdir -p -- "$dst"
-        _rsync -a ${keep} --modify-window=2 ${PROG} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
+        _rsync -a ${keep[@]+"${keep[@]}"} --modify-window=2 ${PROG[@]+"${PROG[@]}"} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
     fi
-    [[ "$rc" -eq 0 ]] || _preview_errors ", then check with  photo.sh verify SRC DST"
+    [[ "$rc" -eq 0 ]] || _preview_errors ", then check with:  photo.sh verify $(_sq "$src") $(_sq "$dst")"
     if [[ "$OPT_C" -eq 1 ]]; then
         _check "$src" "$dst"
-        say "Before wiping the card: eject and reconnect DST (internal disk: run 'sudo purge'), then run  photo.sh verify SRC DST"
+        ok "copy done"
+        say "Not yet safe to wipe the card: DST was partly read back from memory. Eject and reconnect DST"
+        say "(internal disk: run 'sudo purge'), then run:  photo.sh verify $(_sq "$src") $(_sq "$dst")"
+        return 0
     fi
     ok "copy done"
 }
 
 cmd_sync() {
     _args sync "$@"; _have rsync; _rsync_caps
-    local src dst rc=0 run=1 del="" pre="" q="Proceed?"
+    local src dst rc=0 run=1 pre="" q="" del=()
     src="$(_local "$A1")"; dst="$(_local "$A2")"
-    _need_dir "$src"; _not_file "$dst"; _no_overlap sync "$src" "$dst"
+    _need_dir "$src"; _not_file "$dst"; _no_overlap sync "$src" "$dst"; _mounted "$dst"
     _nonempty "$src" || die "Refusing to mirror: SRC has no files (it would wipe DST)."
     say "sync  ${src}  →  ${dst}"
     if [[ -d "$dst" ]]; then
+        _no_blind "$src" "$dst"
         _preview "$src" "$dst" --delete || rc=$?
         [[ "$rc" -ne 98 ]] || die "couldn't read rsync's preview output: nothing changed."
         if [[ "$rc" -ne 0 ]]; then
-            pre="at least "; q="Mirror anyway?"
-            warn "couldn't fully preview the mirror (rsync exit $rc): the lists below may be incomplete."
+            pre="at least "; q=" anyway"
+            warn "couldn't fully preview the mirror (rsync exit $rc, errors above)$(_incomplete "${PV_DEL}${PV_REP}" lists)."
         fi
         if [[ "$rc" -ne 0 || -n "${PV_DEL}${PV_REP}" ]]; then
             _show "$pre"
-            _guard $(( $(_n "$PV_DEL") + $(_n "$PV_REP") )) "$q" "$dst"
+            _guard $(( $(_n "$PV_DEL") + $(_n "$PV_REP") )) "Mirror SRC onto DST ($dst)$q?" "$dst"
             _nonempty "$src" || die "Refusing to mirror: SRC has no files (it would wipe DST)."
             _recheck "$rc" "$src" "$dst" --delete
         elif [[ "$PV_ANY" -eq 0 ]]; then
@@ -369,11 +440,16 @@ cmd_sync() {
         fi
         # Hold the real run to the preview: no --delete when it found nothing to delete, otherwise at
         # most that many. Never --max-delete=0: openrsync reads it as "unlimited".
-        if [[ "$PV_NDEL" -gt 0 ]]; then del=$'--delete\n--max-delete='"$PV_NDEL"; fi
+        if [[ "$PV_NDEL" -gt 0 ]]; then del=( --delete "--max-delete=$PV_NDEL" ); fi
     fi
     if [[ "$run" -eq 1 ]]; then
         mkdir -p -- "$dst"
-        _rsync -a ${del} --modify-window=2 ${PROG} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
+        _rsync -a ${del[@]+"${del[@]}"} --modify-window=2 ${PROG[@]+"${PROG[@]}"} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
+        # rsync 2.x has no exit code 25: it stops deleting at --max-delete without a word
+        if [[ "$PV_NDEL" -gt 0 && "$IW" -eq 9 && "$OPENRSYNC" -eq 0 ]]; then
+            _preview "$src" "$dst" --delete || true
+            [[ -z "$PV_DEL" ]] || _rsync_stopped
+        fi
     fi
     [[ "$rc" -eq 0 ]] || _preview_errors ""
     ok "sync done"
@@ -395,11 +471,12 @@ photo.sh — safe copy, mirror and verify for photo folders and memory cards
 
   photo.sh copy   SRC DST [-c]   copy SRC into DST. Never deletes on DST; asks before replacing.
                                  -c, --verify: afterwards, checksum-compare SRC and DST.
-  photo.sh sync   SRC DST        make DST an exact mirror of SRC; asks before deleting or replacing.
+  photo.sh sync   SRC DST        make DST mirror the files in SRC; asks before deleting or replacing.
   photo.sh verify SRC DST        check that every SRC file is on DST with identical content
                                  (extra files on DST are not reported).
 
 SRC and DST are folders; copy and sync put the CONTENTS of SRC into DST, which is created if needed.
+Finder tags, other extended attributes and creation dates are not copied.
 Before wiping a card, eject and reconnect DST (internal disk: run 'sudo purge'), then run verify,
 so DST is read from the disk rather than from memory.
 

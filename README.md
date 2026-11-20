@@ -12,11 +12,12 @@ No state, no config, no database. Each command is one self-contained operation.
 |---|---|
 | `photo.sh copy SRC DST` | Copies everything from `SRC` into `DST`. Never deletes on `DST`. Asks before replacing a file that is already there with a different size or date. |
 | `photo.sh copy SRC DST -c` | Same, then compares checksums of every file on `SRC` and `DST` (`--verify` also works). |
-| `photo.sh sync SRC DST` | Makes `DST` an exact mirror of `SRC`. Lists the files it would delete or replace on `DST` and asks first. |
+| `photo.sh sync SRC DST` | Makes `DST` a mirror of the files and folders in `SRC`. Lists the files it would delete or replace on `DST` and asks first. |
 | `photo.sh verify SRC DST` | Checks that every file on `SRC` is on `DST` with identical content. Changes nothing. Extra files on `DST` are not reported. |
 
 `SRC` and `DST` are folders. The *contents* of `SRC` go into `DST` (no extra `SRC` folder is created).
-`DST` is created if it does not exist.
+`DST` is created if it does not exist. Finder tags, other extended attributes and creation dates are
+not copied. Symbolic links are copied as links, not as the files they point to.
 
 Exit status: `0` done, `1` failed or aborted, `2` usage error. `photo.sh --help` and `photo.sh --version`
 work as usual.
@@ -57,15 +58,18 @@ two cards with the same file names (`DSC00001.ARW`, …) never collide.
    ```bash
    photo.sh verify /Volumes/CARD /Volumes/PhotoSSD/2026-10-09-shoot/card1
    ```
-4. Only if step 3 prints `checksums match`, format the card in the camera.
+4. Only if step 3's `verify` prints `checksums match`, format the card in the camera. Step 1 prints
+   the same words, but that check read `DST` partly from memory.
 
 `verify` prints how many files it compared (`all 412 SRC files are on DST …`), so a wrong or
 half-empty `SRC` stands out. If verification fails, the script lists the problem files as `missing`
 or `differs` (first 20, plus a count) and exits with `VERIFY FAILED — do not wipe the source.`
+Re-running the same `copy` fills in `missing` files, but it may skip a `differs` file whose size and
+date already match: copy the card into a new, empty folder (e.g. `card1-again`) and verify that one.
 
 ## Other examples
 
-Back up a photo library to an external drive, keeping it an exact copy:
+Back up a photo library to an external drive, keeping its files and folders identical:
 
 ```bash
 photo.sh sync ~/Pictures/Library /Volumes/Backup/Library
@@ -92,7 +96,7 @@ photo.sh copy /Volumes/CARD2 /Volumes/PhotoSSD/2026-10-09-shoot/card2 -c
   on `DST` (and more than the list can show), you must type the number of files instead of `y`. That
   usually means the wrong folder was given, e.g. `CARD/DCIM` against the root of a backup drive, or a
   second card with the same file names synced onto the first card's folder.
-- **Stops when it can't see clearly.** If the dry run reports errors (an unreadable folder, say), the
+- **Warns when it can't see clearly.** If the dry run reports errors (an unreadable folder in `SRC`, say), the
   lists are marked as possibly incomplete, the same limits apply, and the run ends with exit status 1
   so you check it.
 - **Won't mirror an empty card.** `sync` refuses if `SRC` has no files, so syncing from a freshly
@@ -114,8 +118,12 @@ photo.sh copy /Volumes/CARD2 /Volumes/PhotoSSD/2026-10-09-shoot/card2 -c
   the openrsync in current macOS; with the rsync 2.6.9 of older macOS such a folder stays behind).
 - **Tolerates FAT/exFAT timestamps.** Dates within 2 seconds count as equal, so memory-card files are
   not needlessly re-copied.
+- **Stops when it can't see at all.** If a folder on `DST` can't be read, the dry run can't see what
+  is in it, so `copy` and `sync` stop and name it. A `DST` on a drive that isn't connected is refused,
+  instead of being created on the internal disk.
 - **Takes any folder name.** Names with spaces, accents, `:` (which rsync would otherwise read as a
-  remote host) or a leading `-` (after `--`) work.
+  remote host) or a leading `-` work. For a leading `-`, put `--` before the paths and any option
+  before `--`: `photo.sh copy -c -- -card DST`.
 
 ## Tests
 
@@ -126,6 +134,13 @@ photo.sh copy /Volumes/CARD2 /Volumes/PhotoSSD/2026-10-09-shoot/card2 -c
 Runs the helper unit tests and end-to-end `copy` / `sync` / `verify` scenarios on temporary folders,
 once for each `rsync` found (Homebrew and/or the macOS built-in), under the stock bash 3.2.
 GitHub Actions runs the same suite on macOS for every push.
+
+Both scripts are kept clean under [ShellCheck](https://www.shellcheck.net) (`brew install shellcheck`),
+which CI also runs:
+
+```bash
+shellcheck -x photo.sh photo_tests.sh
+```
 
 The tests answer the script's questions through the `PHOTO_SH_TEST_ANSWER` environment variable,
 which only counts when stdin is not a terminal. Don't set it outside the tests. The tests that type
