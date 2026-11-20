@@ -130,3 +130,7 @@ GitHub Actions runs the same suite on macOS for every push.
 The tests answer the script's questions through the `PHOTO_SH_TEST_ANSWER` environment variable,
 which only counts when stdin is not a terminal. Don't set it outside the tests. The tests that type
 into a real terminal run only where a pseudo-terminal is available.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
