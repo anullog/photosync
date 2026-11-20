@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Built-in rsync only
+        run: |
+          /usr/bin/rsync --version | head -2
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash photo_tests.sh
+
+      - name: Homebrew rsync 3.x and built-in rsync
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew list rsync >/dev/null 2>&1 || brew install rsync
+          /bin/bash photo_tests.sh
