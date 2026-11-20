@@ -20,9 +20,10 @@
 # Must be POSIX sh syntax: zsh/sh read this line before any bash-only syntax below. `return` covers
 # being sourced, so the caller's shell stays open; `exit` covers being run.
 # shellcheck disable=SC2317
-[ -n "${BASH_VERSION:-}" ] || { echo "photo.sh: needs bash. Run it as ./photo.sh or: bash photo.sh" >&2; return 2 2>/dev/null; exit 2; }
+[ -n "${BASH_VERSION:-}" ] || { echo "${0##*/}: needs bash. Run it directly, or with: bash ${0##*/}" >&2; return 2 2>/dev/null; exit 2; }
 
-VERSION="1.0.0"
+VERSION="1.1.0"
+ME="${BASH_SOURCE[0]##*/}"   # the name it was run as: photo.sh, or photosync when installed by Homebrew
 
 # Colours per stream (say/ok → stdout, warn/die → stderr); NO_COLOR turns them off.
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then BOLD=$'\e[1m'; GRN=$'\e[32m'; NC=$'\e[0m'; else BOLD=''; GRN=''; NC=''; fi
@@ -360,7 +361,7 @@ _args() {
     done
     for x in "$@"; do _arg "$x"; done
     x=""; [[ "$n" -le 2 ]] || x="   (got $n paths: quote a path with spaces, e.g. \"/Volumes/NO NAME\"; options go before --)"
-    [[ "$n" -eq 2 ]] || { [[ "$cmd" == copy ]] && die "usage: photo.sh copy SRC DST [-c]$x" 2; die "usage: photo.sh $cmd SRC DST$x" 2; }
+    [[ "$n" -eq 2 ]] || { [[ "$cmd" == copy ]] && die "usage: $ME copy SRC DST [-c]$x" 2; die "usage: $ME $cmd SRC DST$x" 2; }
 }
 _arg() {  # one positional argument for _args (uses its local n)
     [[ -n "$1" ]] || die "empty path argument" 2
@@ -404,12 +405,12 @@ cmd_copy() {
         mkdir -p -- "$dst"
         _rsync -a ${keep[@]+"${keep[@]}"} --modify-window=2 ${PROG[@]+"${PROG[@]}"} -h "${EXCLUDES[@]}" "${src}/" "${dst}/"
     fi
-    [[ "$rc" -eq 0 ]] || _preview_errors ", then check with:  photo.sh verify $(_sq "$src") $(_sq "$dst")"
+    [[ "$rc" -eq 0 ]] || _preview_errors ", then check with:  $ME verify $(_sq "$src") $(_sq "$dst")"
     if [[ "$OPT_C" -eq 1 ]]; then
         _check "$src" "$dst"
         ok "copy done"
         say "Not yet safe to wipe the card: DST was partly read back from memory. Eject and reconnect DST"
-        say "(internal disk: run 'sudo purge'), then run:  photo.sh verify $(_sq "$src") $(_sq "$dst")"
+        say "(internal disk: run 'sudo purge'), then run:  $ME verify $(_sq "$src") $(_sq "$dst")"
         return 0
     fi
     ok "copy done"
@@ -466,21 +467,24 @@ cmd_verify() {
 }
 
 usage() {
-    cat <<'EOF'
-photo.sh — safe copy, mirror and verify for photo folders and memory cards
+    cat <<EOF
+${ME} — safe copy, mirror and verify for photo folders and memory cards
 
-  photo.sh copy   SRC DST [-c]   copy SRC into DST. Never deletes on DST; asks before replacing.
-                                 -c, --verify: afterwards, checksum-compare SRC and DST.
-  photo.sh sync   SRC DST        make DST mirror the files in SRC; asks before deleting or replacing.
-  photo.sh verify SRC DST        check that every SRC file is on DST with identical content
-                                 (extra files on DST are not reported).
+  ${ME} copy SRC DST [-c]
+      copy SRC into DST. Never deletes on DST; asks before replacing.
+      -c, --verify: afterwards, checksum-compare SRC and DST.
+  ${ME} sync SRC DST
+      make DST mirror the files in SRC; asks before deleting or replacing.
+  ${ME} verify SRC DST
+      check that every SRC file is on DST with identical content (extra files on DST are not
+      reported).
 
 SRC and DST are folders; copy and sync put the CONTENTS of SRC into DST, which is created if needed.
 Finder tags, other extended attributes and creation dates are not copied.
 Before wiping a card, eject and reconnect DST (internal disk: run 'sudo purge'), then run verify,
 so DST is read from the disk rather than from memory.
 
-Exit status: 0 done, 1 failed or aborted, 2 usage error.   photo.sh --version shows the version.
+Exit status: 0 done, 1 failed or aborted, 2 usage error.   ${ME} --version shows the version.
 EOF
 }
 
@@ -490,7 +494,7 @@ _main() {
     case "$sub" in
         copy|sync|verify) "cmd_$sub" "$@";;
         -h|--help|help)   usage;;
-        -V|--version)     printf 'photo.sh %s\n' "$VERSION";;
+        -V|--version)     printf '%s %s\n' "$ME" "$VERSION";;
         *)                usage >&2; die "unknown command: $sub" 2;;
     esac
 }

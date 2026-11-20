@@ -143,6 +143,9 @@ run;                        eq "no args rc" "$RC" 2
 run --help;                 eq "help rc" "$RC" 0;                 has "help text" "$OUT" "photo.sh verify SRC DST"
 run sync -h;                eq "sync -h rc" "$RC" 0
 run --version;              eq "version rc" "$RC" 0;              has "version text" "$OUT" "photo.sh $VERSION"
+ln -s "$HERE/photo.sh" "$T/photosync"                           # installed under another name (Homebrew)
+OUT="$("$BASH" "$T/photosync" --help 2>&1)"; has "own name: help" "$OUT" "photosync verify SRC DST"
+OUT="$("$BASH" "$T/photosync" sync "$T/a" 2>&1)"; has "own name: usage" "$OUT" "usage: photosync sync SRC DST"
 if command -v zsh >/dev/null 2>&1; then
     OUT="$(zsh "$HERE/photo.sh" copy a b 2>&1)"; eq "zsh: refused rc" "$?" 2; has "zsh: message" "$OUT" "needs bash"
 fi

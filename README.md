@@ -1,6 +1,6 @@
 # photosync
 
-`photo.sh` is a small macOS script for getting photos off memory cards safely in the field.
+`photosync` is a small macOS command for getting photos off memory cards safely in the field.
 It wraps `rsync` with checks that stop you from losing files: it previews what would change,
 asks before replacing or deleting anything, and can checksum-verify a copy before you wipe the card.
 
@@ -10,16 +10,16 @@ No state, no config, no database. Each command is one self-contained operation.
 
 | Command | What it does |
 |---|---|
-| `photo.sh copy SRC DST` | Copies everything from `SRC` into `DST`. Never deletes on `DST`. Asks before replacing a file that is already there with a different size or date. |
-| `photo.sh copy SRC DST -c` | Same, then compares checksums of every file on `SRC` and `DST` (`--verify` also works). |
-| `photo.sh sync SRC DST` | Makes `DST` a mirror of the files and folders in `SRC`. Lists the files it would delete or replace on `DST` and asks first. |
-| `photo.sh verify SRC DST` | Checks that every file on `SRC` is on `DST` with identical content. Changes nothing. Extra files on `DST` are not reported. |
+| `photosync copy SRC DST` | Copies everything from `SRC` into `DST`. Never deletes on `DST`. Asks before replacing a file that is already there with a different size or date. |
+| `photosync copy SRC DST -c` | Same, then compares checksums of every file on `SRC` and `DST` (`--verify` also works). |
+| `photosync sync SRC DST` | Makes `DST` a mirror of the files and folders in `SRC`. Lists the files it would delete or replace on `DST` and asks first. |
+| `photosync verify SRC DST` | Checks that every file on `SRC` is on `DST` with identical content. Changes nothing. Extra files on `DST` are not reported. |
 
 `SRC` and `DST` are folders. The *contents* of `SRC` go into `DST` (no extra `SRC` folder is created).
 `DST` is created if it does not exist. Finder tags, other extended attributes and creation dates are
 not copied. Symbolic links are copied as links, not as the files they point to.
 
-Exit status: `0` done, `1` failed or aborted, `2` usage error. `photo.sh --help` and `photo.sh --version`
+Exit status: `0` done, `1` failed or aborted, `2` usage error. `photosync --help` and `photosync --version`
 work as usual.
 
 ## Requirements
@@ -30,16 +30,24 @@ work as usual.
 
 ## Install
 
+With [Homebrew](https://brew.sh):
+
+```bash
+brew install anullog/tap/photosync
+```
+
+`brew upgrade` then keeps it up to date. To uninstall: `brew uninstall photosync`.
+
+Or from a clone (the script is `photo.sh`; this links it into your `PATH` as `photosync`):
+
 ```bash
 git clone https://github.com/anullog/photosync.git
 cd photosync
+ln -s "$PWD/photo.sh" "$(brew --prefix 2>/dev/null || echo /usr/local)/bin/photosync"
 ```
 
-Optional, to run it as `photo.sh` from anywhere:
-
-```bash
-sudo mkdir -p /usr/local/bin && sudo ln -s "$PWD/photo.sh" /usr/local/bin/photo.sh
-```
+Without Homebrew, `/usr/local/bin` may need `sudo`. You can also run `./photo.sh` from the clone; the
+commands are the same, and its messages use whichever name you ran it under.
 
 ## Offloading a card safely
 
@@ -49,14 +57,14 @@ two cards with the same file names (`DSC00001.ARW`, …) never collide.
 
 1. Copy and verify:
    ```bash
-   photo.sh copy /Volumes/CARD /Volumes/PhotoSSD/2026-10-09-shoot/card1 -c
+   photosync copy /Volumes/CARD /Volumes/PhotoSSD/2026-10-09-shoot/card1 -c
    ```
 2. Eject the destination drive and plug it back in. Right after a copy, macOS serves most of the
    files from memory, so step 1's check does not prove the data reached the disk.
    If the destination is the internal disk, run `sudo purge` instead.
 3. Verify again, now reading from the disk:
    ```bash
-   photo.sh verify /Volumes/CARD /Volumes/PhotoSSD/2026-10-09-shoot/card1
+   photosync verify /Volumes/CARD /Volumes/PhotoSSD/2026-10-09-shoot/card1
    ```
 4. Only if step 3's `verify` prints `checksums match`, format the card in the camera. Step 1 prints
    the same words, but that check read `DST` partly from memory.
@@ -72,13 +80,13 @@ date already match: copy the card into a new, empty folder (e.g. `card1-again`) 
 Back up a photo library to an external drive, keeping its files and folders identical:
 
 ```bash
-photo.sh sync ~/Pictures/Library /Volumes/Backup/Library
+photosync sync ~/Pictures/Library /Volumes/Backup/Library
 ```
 
 Offload a second card from the same shoot (re-running any copy is cheap: unchanged files are skipped):
 
 ```bash
-photo.sh copy /Volumes/CARD2 /Volumes/PhotoSSD/2026-10-09-shoot/card2 -c
+photosync copy /Volumes/CARD2 /Volumes/PhotoSSD/2026-10-09-shoot/card2 -c
 ```
 
 ## How it keeps your files safe
@@ -123,7 +131,7 @@ photo.sh copy /Volumes/CARD2 /Volumes/PhotoSSD/2026-10-09-shoot/card2 -c
   instead of being created on the internal disk.
 - **Takes any folder name.** Names with spaces, accents, `:` (which rsync would otherwise read as a
   remote host) or a leading `-` work. For a leading `-`, put `--` before the paths and any option
-  before `--`: `photo.sh copy -c -- -card DST`.
+  before `--`: `photosync copy -c -- -card DST`.
 
 ## Tests
 
