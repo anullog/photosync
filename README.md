@@ -144,7 +144,8 @@ shellcheck -x photo.sh photo_tests.sh
 
 The tests answer the script's questions through the `PHOTO_SH_TEST_ANSWER` environment variable,
 which only counts when stdin is not a terminal. Don't set it outside the tests. The tests that type
-into a real terminal run only where a pseudo-terminal is available.
+into a real terminal use `expect` (part of macOS) and run only where a pseudo-terminal is available;
+CI requires them.
 
 ## License
 

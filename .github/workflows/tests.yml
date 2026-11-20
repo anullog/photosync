@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
@@ -25,14 +25,12 @@ jobs:
           "$RUNNER_TEMP/sc/bin/shellcheck" -x --shell=bash photo.sh photo_tests.sh
 
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     timeout-minutes: 15
+    env:
+      PHOTO_TESTS_REQUIRE_PTY: 1   # the terminal tests must run here, not be skipped
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 

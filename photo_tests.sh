@@ -197,6 +197,23 @@ cat > "$FAKE/awk/awk" <<'EOF'
 for a; do [[ -n "${PHOTO_TESTS_AWK_FAIL:-}" && "$a" == *"$PHOTO_TESTS_AWK_FAIL"* ]] && exit 2; done
 exec /usr/bin/awk "$@"
 EOF
+cat > "$FAKE/tty.exp" <<'EOF'
+# Run a command on a pseudo-terminal, wait for its question, then type the answer as a person would.
+# usage: expect tty.exp ANSWER COMMAND [ARGS...]; exits with the command's status, or 97 if no
+# question came.
+set timeout 120
+log_user 0
+set answer [lindex $argv 0]
+if {[catch {spawn -noecho {*}[lrange $argv 1 end]}]} { exit 97 }
+expect {
+    -re {\[y/N\] $|type the number [0-9]+: $} { send -- "$answer\r" }
+    timeout { exit 97 }
+    eof     { exit 97 }
+}
+expect eof
+catch wait result
+exit [lindex $result 3]
+EOF
 chmod +x "$FAKE"/*/*
 late(){ rm -f "$1/cnt"; export PHOTO_TESTS_LATE_DIR="$1" PHOTO_TESTS_LATE_N="$2" PHOTO_TESTS_LATE_SUB="${3:-d}"; }
 
@@ -540,12 +557,16 @@ for R in "${IMPLS[@]}"; do
     run copy "$W/nope" "$W/sv/d"
     has    "$t missing SRC: hint"        "$OUT" "check that it is connected"
 
-    # the real terminal: only when a pseudo-terminal can be opened here
-    if script -q /dev/null /usr/bin/true >/dev/null 2>&1; then
+    # the real terminal: expect waits for the question and types the answer. Only where a
+    # pseudo-terminal can be opened (CI sets PHOTO_TESTS_REQUIRE_PTY so this can't be skipped there).
+    if command -v expect >/dev/null 2>&1 &&
+       expect -c 'if {[catch {spawn -noecho /usr/bin/true}]} { exit 1 }; expect eof' >/dev/null 2>&1; then
         mk "$W/pty/s/A.ARW" new; mk "$W/pty/d/A.ARW" old
-        printf 'n\n' | script -q /dev/null "$BASH" "$HERE/photo.sh" copy "$W/pty/s" "$W/pty/d" >/dev/null 2>&1
+        expect "$FAKE/tty.exp" n "$BASH" "$HERE/photo.sh" copy "$W/pty/s" "$W/pty/d"; RC=$?
+        eq "$t tty: n aborts"     "$RC" 1
         eq "$t tty: n keeps"      "$(cat "$W/pty/d/A.ARW")" old
-        printf 'y\n' | script -q /dev/null "$BASH" "$HERE/photo.sh" copy "$W/pty/s" "$W/pty/d" >/dev/null 2>&1
+        expect "$FAKE/tty.exp" y "$BASH" "$HERE/photo.sh" copy "$W/pty/s" "$W/pty/d"; RC=$?
+        eq "$t tty: y rc"         "$RC" 0
         eq "$t tty: y replaces"   "$(cat "$W/pty/d/A.ARW")" new
     elif [[ -n "${PHOTO_TESTS_REQUIRE_PTY:-}" ]]; then bad_ "$t tty: no pseudo-terminal"
     else printf '  (skipped %s terminal tests: no pseudo-terminal)\n' "$t"; fi
