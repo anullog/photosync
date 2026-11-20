@@ -561,13 +561,13 @@ for R in "${IMPLS[@]}"; do
     # pseudo-terminal can be opened (CI sets PHOTO_TESTS_REQUIRE_PTY so this can't be skipped there).
     if command -v expect >/dev/null 2>&1 &&
        expect -c 'if {[catch {spawn -noecho /usr/bin/true}]} { exit 1 }; expect eof' >/dev/null 2>&1; then
-        mk "$W/pty/s/A.ARW" new; mk "$W/pty/d/A.ARW" old
+        mk "$W/pty/s/A.ARW" new-version; mk "$W/pty/d/A.ARW" old   # sizes differ: a real clash
         expect "$FAKE/tty.exp" n "$BASH" "$HERE/photo.sh" copy "$W/pty/s" "$W/pty/d"; RC=$?
         eq "$t tty: n aborts"     "$RC" 1
         eq "$t tty: n keeps"      "$(cat "$W/pty/d/A.ARW")" old
         expect "$FAKE/tty.exp" y "$BASH" "$HERE/photo.sh" copy "$W/pty/s" "$W/pty/d"; RC=$?
         eq "$t tty: y rc"         "$RC" 0
-        eq "$t tty: y replaces"   "$(cat "$W/pty/d/A.ARW")" new
+        eq "$t tty: y replaces"   "$(cat "$W/pty/d/A.ARW")" new-version
     elif [[ -n "${PHOTO_TESTS_REQUIRE_PTY:-}" ]]; then bad_ "$t tty: no pseudo-terminal"
     else printf '  (skipped %s terminal tests: no pseudo-terminal)\n' "$t"; fi
 
